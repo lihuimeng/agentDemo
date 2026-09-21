@@ -110,60 +110,66 @@ available_tools = {
 
 from openai import OpenAI
 
-model = 'GLM-4-Flash'
-api_key = os.getenv("ZHIPUAI_API_KEY")
-if not api_key:
-    raise SystemExit("错误: 未设置 ZHIPUAI_API_KEY 环境变量。请先执行: export ZHIPUAI_API_KEY=\"你的key\"")
-
-url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-headers = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {api_key}"
-}
 
 
-def generate(prompt: str, sysPrompt: str) -> str:
+from openai import OpenAI
+
+class OpenAICompatibleClient:
     """
-    调用ZhipuAI的API生成文本,失败时自动重试
-    :param prompt:
-    :return:
+    一个用于调用任何兼容OpenAI接口的LLM服务的客户端。
     """
-    print("正在调用大语言模型...")
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "user", "content": prompt},
-            {"role": "system", "content": sysPrompt},
-        ]
-    }
-    for attempt in range(3):
+    def __init__(self, model: str, api_key: str, base_url: str):
+        self.model = model
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
+
+    def generate(self, prompt: str, system_prompt: str) -> str:
+        """调用LLM API来生成回应。"""
+        print("正在调用大语言模型...")
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-            data = response.json()
-            if response.status_code == 200 and 'choices' in data:
-                print("大语言模型响应成功。")
-                return data['choices'][0]['message']['content']
-            print(f"大模型API异常(第{attempt + 1}次): HTTP {response.status_code}, 响应: {response.text[:200]}")
-        except (requests.exceptions.RequestException, ValueError) as e:
-            print(f"大模型请求失败(第{attempt + 1}次): {e}")
-        time.sleep(2)
-    raise RuntimeError("调用大语言模型连续3次失败,请检查网络、API Key或账户额度。")
+            messages = [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': prompt}
+            ]
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                stream=False
+            )
+            answer = response.choices[0].message.content
+            print("大语言模型响应成功。")
+            return answer
+        except Exception as e:
+            print(f"调用LLM API时发生错误: {e}")
+            return "错误:调用语言模型服务时出错。"
+
 
 import re
+
+API_KEY = os.environ.get("xinfei_api_key")
+BASE_URL = "https://litellm.xinfei-inc.cn"
+MODEL_ID = "gpt-6-astra"
+llm = OpenAICompatibleClient(
+    model=MODEL_ID,
+    api_key=API_KEY,
+    base_url=BASE_URL
+)
+
 # --- 2. 初始化 ---
 user_city = input("请输入你想查询的城市：").strip()
 user_prompt = f"你好，请帮我查询一下今天{user_city}的天气，然后根据天气推荐一个合适的旅游景点。"
 prompt_history = [f"用户请求: {user_prompt}"]
+
 print(f"用户输入: {user_prompt}\n" + "="*40)
 
-for i in range(5):
+# --- 3. 运行主循环 ---
+for i in range(5): # 设置最大循环次数
     print(f"--- 循环 {i+1} ---\n")
+
     # 3.1. 构建Prompt
     full_prompt = "\n".join(prompt_history)
 
     # 3.2. 调用LLM进行思考
-    llm_output = generate(full_prompt, AGENT_SYSTEM_PROMPT)
-
+    llm_output = llm.generate(full_prompt, system_prompt=AGENT_SYSTEM_PROMPT)
     # 模型可能会输出多余的Thought-Action，需要截断
     match = re.search(r'(Thought:.*?Action:.*?)(?=\n\s*(?:Thought:|Action:|Observation:)|\Z)', llm_output, re.DOTALL)
     if match:
@@ -185,27 +191,12 @@ for i in range(5):
     action_str = action_match.group(1).strip()
 
     if action_str.startswith("Finish"):
-        final_match = re.match(r"Finish\[(.*)\]", action_str, re.DOTALL)
-        if final_match:
-            final_answer = final_match.group(1)
-            print(f"任务完成，最终答案: {final_answer}")
-            break
-        observation = "错误: Finish 必须使用 Finish[最终答案] 格式，最终答案需放在方括号内。"
-        observation_str = f"Observation: {observation}"
-        print(f"{observation_str}\n" + "="*40)
-        prompt_history.append(observation_str)
-        continue
+        final_answer = re.match(r"Finish\[(.*)\]", action_str).group(1)
+        print(f"任务完成，最终答案: {final_answer}")
+        break
 
-    # Action 必须是工具调用格式,否则反馈错误让模型重试
-    tool_match = re.search(r"(\w+)\(", action_str)
-    if not tool_match:
-        observation = "错误: Action 必须是工具调用格式 function_name(arg=\"value\") 或 Finish[最终答案]，不能是普通文本。"
-        observation_str = f"Observation: {observation}"
-        print(f"{observation_str}\n" + "="*40)
-        prompt_history.append(observation_str)
-        continue
-    tool_name = tool_match.group(1)
-    args_str = re.search(r"\((.*)\)", action_str, re.DOTALL).group(1)
+    tool_name = re.search(r"(\w+)\(", action_str).group(1)
+    args_str = re.search(r"\((.*)\)", action_str).group(1)
     kwargs = dict(re.findall(r'(\w+)="([^"]*)"', args_str))
 
     if tool_name in available_tools:
